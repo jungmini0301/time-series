@@ -1,0 +1,325 @@
+---
+title: "Estimating Disease Burden"
+author: "Jungmin Chang"
+date: "January 19, 2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=F, message=F}
+library("tidyverse")
+library("knitr")
+library("ggplot2")
+library("lattice") # Graphic library used in one of the questions
+
+# Set your working directory as needed.
+# opts_knit$set(root.dir = "...")
+```
+
+## Load Data
+
+```{r load}
+# Read data files as downloaded after minor cleaning
+death <- read.csv("Table_S1_clean.csv")
+glimpse(death)
+nrow(death) #869 rows
+    #YRSEAS-- year of season, define a season as Sep 1st to Aug 31st
+    #JAN1-- control unusual weeks
+    #FLUA, FLUB, RSVPOS, PCTA, PCTB (prop)-- estimates for circulating virus
+# Cast columns to correct data types
+death$DEATHDT <- as.Date(death$DEATHDT)
+death$MONTH <- as.factor(death$MONTH)
+```
+
+## Plot Deaths and Seasons
+
+```{r seasons}
+# Create date sequences for labelling plots
+months <- seq(from = head(death$DEATHDT, 1), to = tail(death$DEATHDT, 1), by = "months")
+quarters <- seq(from = head(death$DEATHDT, 1), to = tail(death$DEATHDT, 1), by = "quarters")
+years <- seq(from = as.Date("1993-06-15"), to = as.Date("2008-06-15"), by = "years")
+seasons <- seq(1993, 2009)
+
+# Plot observed counts
+## draw a plot with two Date axes, one with quarters, and one with years
+plot(death$DEATHDT, death$COUNT,
+  type = "n", bty = "n", xaxt = "n", yaxt = "n",
+  xlab = "Date", ylab = "", ylim = c(3500, 5500), xlim = c(head(death$DEATHDT, 1), tail(death$DEATHDT, 1))
+)
+axis.Date(1, at = quarters, format = "%b", cex.axis = 0.6, mgp = c(3, 0.5, 0))
+axis.Date(1, at = years, format = "%Y", tick = FALSE, cex.axis = 0.8, mgp = c(5, 1.5, 0))
+
+# Create axis and add data for all-cause mortality
+death.col <- "dark gray"
+axis(2, at = seq(3500, 5500, 500), col = death.col, col.axis = death.col, mgp = c(2, 0.5, 0), cex.axis = 0.8)
+mtext("Deaths in Canada (per week)", side = 2, line = 2, at = 4500, col = death.col, cex = 0.8)
+lines(death$DEATHDT, death$COUNT, type = "l", col = death.col)
+
+# Add periseason boundaries (Nov to Apr) to plot
+nov <- seq(from = as.Date("1992-11-01"), to = as.Date("2008-11-01"), by = "years")
+apr <- seq(from = as.Date("1993-04-01"), to = as.Date("2009-04-01"), by = "years")
+y.pts <- rep(c(3500, 5500, 5500, 3500), length(nov))
+x.pts <- NULL
+for (month in 1:length(nov)) {
+  x.pts <- c(x.pts, c(nov[month], nov[month], apr[month], apr[month]))
+} # for
+polygon(x.pts, y.pts, density = NULL, col = "#00009933", border = NA)
+
+# Identify influenza A season boundaries using calendar and WHO reporting data
+#  according to a simplified verion of the method described by Neuzil
+season.n <- NULL
+for (season in seasons) {
+  n.tests <- sum(death$FLUA[death$YRSEAS == season])
+  season.n <- c(season.n, death$FLUA[death$YRSEAS == season] > n.tests * 0.01)
+} # for
+summary(season.n)
+# Plot seasons
+periseason <- c("Nov", "Dec", "Jan", "Feb", "Mar", "Apr")
+death$peri <- is.element(format(death$DEATHDT, format = "%b"), periseason)
+death$neuzil <- season.n 
+# Modify outlier that is not connected to season
+death$neuzil[death$WEEK == 206] <- FALSE
+
+# Add seasonal boundaries at base of plot
+points(death$DEATHDT, (death$neuzil * 3500 - 50), pch = "-", cex = 1)
+
+recorded.plot <- recordPlot()
+```
+
+**Q1: Summarize distribution of weeks by summer, periseason, and season.**
+
+```{r q1}
+# Place any additional code here
+# add season.n column to death data 
+death$season.n <-  season.n 
+# create a data frame 
+q1summer <- death[death$peri==FALSE, c(1:14)] #--429
+q1peri <- death[death$peri==TRUE & death$neuzil==FALSE , c(1:14)] #--156
+q1neuzil <- death[death$peri==TRUE & death$neuzil==TRUE, c(1:14)] #--284
+# create a data frame
+dist <- death %>% group_by(YRSEAS)  %>% 
+  summarise(Summer = n() - sum(peri), Periseason = sum(!neuzil&peri), Circulating = sum(neuzil&peri))
+
+# plot
+
+plot(dist$YRSEAS, dist$Summer, type = "l", xlab = "Years", ylab = "Number of Weeks", main = "Distribution of Weeks per Influenza Season", cex.axis = 0.8, cex.main = 1, cex.lab = 0.8, ylim = c(2,27))
+lines(dist$YRSEAS, dist$Periseason, type = "l", lty = 'dotted')
+lines(dist$YRSEAS, dist$Circulating, type = "l", lty = 'longdash')
+legend("topleft", inset = c(0.1, 0.1), bty='n', legend = c("Summer", "Peri-season", "Circulating-season"), lty =c("solid", "dotted", "longdash"), cex = 0.6)
+
+```
+
+The summer season every year (May - October) had the greatest number of weeks. The last year of observation had much smaller number of weeks. This may be attributable to incomplete observation in a given year.
+
+The circulating season was defined as the time from November to April when tests for influenza was greater than 1%. The number of weeks in the circulating season was greater than the peri season except the first year of observation. 
+
+The periseason was defined as the time from November to April when influenza was not circulating. The peri season constantly had smaller number of weeks than the summer season and the circulating season.
+
+The distribution showed possible influenza outbreaks where the number of weeks in the circulating season was much greater than the peri season.
+
+## Periseason
+
+```{r periseason}
+head(death)
+
+# Calculate excess mortality using periseason approaches
+weeks.p <- sum(death$peri & !death$neuzil)
+count.p <- sum(death$COUNT[(death$peri & !death$neuzil)])
+
+weeks.n <- sum(death$peri & death$neuzil)
+count.n <- sum(death$COUNT[(death$peri & death$neuzil)])
+
+
+# Rate difference (deaths / week)
+rd.n <-  (count.n/weeks.n) -(count.p/weeks.p) #-- 4571.894 #--4251.872
+rd.n  #--320.02
+
+# Create empty data.frame to hold counts of excess deaths attributable to influenza in each season
+excess <- data.frame(season=seasons, n.total=rep(NA,length(seasons)), n.weeks=rep(NA,length(seasons)))
+
+# Use a for loop to fill the excess data.frame with values (weeks and counts) for the periseason method
+periods <- unique(death[, c("YRSEAS", "neuzil")])
+n_period <- nrow(periods)
+
+for(period in periods$YRSEAS){
+  excess$n.total[excess$season == period] = length(q1neuzil$WEEKOFYRS[q1neuzil$YRSEAS == period])*rd.n
+  excess$n.weeks[excess$season == period] = length(q1neuzil$WEEKOFYRS[q1neuzil$YRSEAS == period])
+ 
+}
+
+```
+
+**Q2: Describe the mortality attributable to influenza using the periseason method.**
+
+```{r q2}
+mean(excess$n.total)
+# Place any additional code here
+plot(excess$season,excess$n.total, type = "l", main="Excess Deaths Attributable To Influenza \n Using Peri-Season Method", lwd = 2.5, cex.main = 1, cex.lab = 0.8, xlab="Seasons", ylab = "Number of Excess Deaths")
+```
+Throughout this analysis, we made two major assumptions; 1) We can only have influenza from April to November, 2) test frequency perfectly defines influenza virus circulation.
+
+In the the periseason method the mortality attributable to influenza was calculated as mortality rate difference between the circulating season and the periseason (counterfactual). It is worth noting that we could have used different rate for each week rather using the same rate.
+
+The anuual average mortality attributable to influenza during a period of observation using the peri-season method was approximately 5346 (deaths). The mortality fluctuated from year to year. There were spikes in 1996, 2003, 2007 and 2008 where the number of excess deaths were greater than 6000, which may indicate outbreaks of influenza.
+
+## Serfling
+```{r serfling}
+recorded.plot # Restore plot
+
+# Define variables for the Serfling (and GLM) model
+t <- seq(1, nrow(death))
+t2 <- t^2
+t3 <- t^3
+c <- cos(2 * pi * t / 52)
+s <- sin(2 * pi * t / 52)
+
+# Censor data during circulating influenza periods for fitting model
+# - Create an empty vector to hold outcome data that will be used to fit model
+y.fit <- rep(NA, length(death$COUNT)) #--censoring
+# - Populate the vector with values outside the influenza seasons
+y.fit[death$neuzil == FALSE | death$peri == FALSE] <- death$COUNT[death$neuzil == FALSE | death$peri == FALSE]
+# - Create data frome to hold data for fitting the model
+fit.data <- data.frame(y = y.fit, t = t, t2 = t2, t3 = t3, c = c, s = s)
+
+# Create data frame without outcome for prediction of censored weeks
+predict.data <- data.frame(t = t, t2 = t2, t3 = t3, c = c, s = s)
+
+# Fit the model
+serfling <- glm(y ~ c + s + t + t2 + t3, data = fit.data)
+
+# Predict deaths for censored days (and obtain model fit for other days)
+serfling.predict <- predict(serfling, predict.data)
+
+# Plot fit and predicted values
+points(death$DEATHDT[death$neuzil == TRUE & death$peri == TRUE], serfling.predict[death$neuzil == TRUE & death$peri == TRUE], pch = 1, cex = 0.4, col = "light blue")
+points(death$DEATHDT[(death$neuzil == FALSE | death$peri == FALSE)], serfling.predict[(death$neuzil == FALSE | death$peri == FALSE)], pch = 16, cex = 0.4, col = "dark blue")
+head(death)
+# Use a for loop to calculate the excess deaths per season based on the Serfling model and to place the values in the excess data.frame.
+#  Consider excess on days the observed count is above the predicted.
+   #--excess mortality is calculated as the sum of the deaths that fall above the predicted baseline without influenza either when virus circulating
+
+death.serfling1 <- data.frame(death, predict = serfling.predict)
+death.serfling <- subset(death.serfling1, death.serfling1$COUNT > death.serfling1$predict & death.serfling1$peri == TRUE & death.serfling1$neuzil==TRUE)
+head(death.serfling)
+
+for(period in periods$YRSEAS){
+  excess$s.total[excess$season == period] = sum(death.serfling$COUNT[death.serfling$YRSEAS == period]) -
+    sum(death.serfling$predict[death.serfling$YRSEAS == period])
+  excess$s.weeks[excess$season == period] = length(death.serfling$WEEKOFYRS[death.serfling$YRSEAS == period])
+}
+
+recorded.plot <- recordPlot()
+```
+
+**Q3: Describe the mortality attributable to influenza using the cyclical regression method.**
+
+```{r q3}
+# Place any additional code here
+mean(excess$s.total)
+
+plot(excess$season,excess$s.total, lwd = 2.5, type = "l", main="Excess Deaths Attributable To Influenza \n Using Serfling Method", cex.axis = 0.8, cex.main = 1, cex.lab = 0.8, xlab="Seasons", ylab = "Number of Excess Deaths", ylim = c(500,6500))
+lines(excess$season, excess$n.total, type = "l", lty="dotted")
+legend("topleft", bty='n', legend = c("Serfling", "Periseason"), lty =c("solid", "dotted"), cex = 0.6, lwd = c(2.5, 1))
+```
+
+For the serfling method we first censored the data in the circulating season and fitted the serfling regression model to the censored data. Then we compared the observed data to the predicted values from the serfling model (counterfactual). For excess mortality we only considered excess on days the observed count was greater the predicted and compared the observed and the predicted estimates within the circulating season. Seasonal assumption didn't really matter in this approach.
+
+The annual estimates of influenza-associated deaths from the serfling method were constantly lower than the periseason method. However in 1998, 1999 and 2005 the serfling method yielded greater number of excess deaths than the periseason method. The estimates were also fluctuating from year to year.
+
+
+## GLM (Poisson)
+```{r poisson}
+recorded.plot # Restore plot
+# Define data structures
+# - Create a data.frame for fitting the model
+fit.data.p <- data.frame(y = death$COUNT, c = c, s = s, month = death$MONTH, jan = death$JAN1, flua = death$FLUA, flub = death$FLUB, rsv = death$RSVPOS, week = death$WEEK) #--
+# - Create a data.frame for 'predicting' deaths, really the model fit for each week
+predict.data.p <- data.frame(c = c, s = s, month = death$MONTH, jan = death$JAN1, flua = death$FLUA, flub = death$FLUB, rsv = death$RSVPOS, week = death$WEEK) #--counterfactual(green)
+# - Create a data.frame for predicting deaths in the absence of influenza a
+predict.data.p.noflua <- data.frame(c = c, s = s, month = death$MONTH, jan = death$JAN1, flua = rep(0, nrow(death)), flub = death$FLUB, rsv = death$RSVPOS, week = death$WEEK)
+
+# Fit the model
+poisson <- glm(y ~ c + s + month + jan + flua + rsv + week, data = fit.data.p, family = poisson(link = "log"))
+
+# Predict deaths for all days with and without influenza A circulating
+poisson.predict <- predict(poisson, predict.data.p, type = "response")
+poisson.predict.noflua <- predict(poisson, predict.data.p.noflua, type = "response")
+
+# Plot the fit and predicted values
+lines(death$DEATHDT, poisson.predict, col = "orange", lty = 1)
+lines(death$DEATHDT, poisson.predict.noflua, col = "green", lty = 1)
+
+# Use a for loop to calculate the excess deaths per season using Poisson model and assign the values to the excess data.frame.
+
+death.poisson.1 <- data.frame(death, predict = poisson.predict, predict.noflu = poisson.predict.noflua)
+death.poisson <- subset(death.poisson.1, death.poisson.1$COUNT > death.poisson.1$predict.noflu & death.poisson.1$peri== TRUE & death.poisson.1$neuzil==TRUE)
+head(death.poisson)
+
+for(period in periods$YRSEAS){
+  excess$p.total[excess$season == period] = sum(death.poisson$COUNT[death.poisson$YRSEAS == period]) - sum(death.poisson$predict.noflu[death.poisson$YRSEAS == period])
+  excess$p.weeks[excess$season == period] = length(death.poisson$WEEKOFYRS[death.poisson$YRSEAS == period])
+}
+
+#set to zero
+excess$p.total[excess$p.total<0] <- 0
+
+recorded.plot <- recordPlot()
+```
+
+
+**Q4: Describe the mortality attributable to influenza using the GLM method.**
+
+```{r q4}
+# Place any additional code here
+mean(excess$p.total)
+
+plot(excess$season,excess$p.total, lwd = 2.5, type = "l", main="Excess Deaths Attributable To Influenza \n Using Poisson Regression", cex.axis = 0.8, cex.main = 1, cex.lab = 0.8, xlab="Seasons", ylab = "Number of Excess Deaths", ylim = c(500,6500))
+lines(excess$season, excess$n.total, type = "l", lty="dotted")
+lines(excess$season, excess$s.total, type = "l", lty="longdash")
+legend("topleft", bty='n', legend = c("Poisson", "Periseason", "Serfling"), lty =c("solid", "dotted", "longdash"), lwd = c(2.5, 1,1), cex = 0.6)
+```
+
+For the poisson regression we took the entire observation into account looking for the best possible fit to the observed data. Our counterfactual was the estimates predicted when there was no circulating influenza.
+
+The poisson regression model yielded fewer number of excess deaths compared to the periseason and the serfling method with a few exceptions. In 1998, the estimate from the poisson regression (5238.8434) was higher than the periseason method (4480.316). The poisson regression showed higher excess deaths (4264.2859) than the serfling method (3793.124) in 2008. The trends of estimates from the poisson regression and the serfling method were more or less the same with some overlap. In 2009 the estimate from the poisson regression increased whereas the estimate from the serfling method decreased than in previous year.
+
+## Plot Excess Deaths by Method
+```{r comparison}
+# Create boxplot of excess deaths by method, with seasons as observations
+# Prepare the data structure
+excess.total <- excess[, c("season", "n.total", "s.total", "p.total")]
+methods <- c("neuzil", "serfling", "poisson")
+methods.vector <- c(rep(methods[1], length(seasons)), rep(methods[2], length(seasons)), rep(methods[3], length(seasons)))
+excess.long <- data.frame(season = rep(seasons, 3), method = methods.vector, deaths = rep(NA, length(seasons) * 3))
+for (season in seasons) {
+  for (method in methods) {
+    excess.long$deaths[excess.long$season == season & excess.long$method == method] <- excess.total[excess.total == season, (which(methods == method) + 1)]
+  } # for - methods
+} # for - seasons
+
+# Draw the plot
+bwplot(deaths ~ method, data = excess.long, horizontal = FALSE)
+
+```
+
+**Q5: Which method would you recommend and why?**
+
+It is interesting that three models to make estimates of influenza associated death produced a different range of the burden of influenza associated death during a period of observation. The periseason method (the rate difference method) yielded the highest estimates and the box seemed to be comparatively short which means overall estimates had similar values. The lengths of the boxes for the poisson regression and the serfling method were more or less the same. The estimates for the poisson regression were more skewed to the left, in other words, the method included relatively smaller estimates than the serfling method. For the poisson regression we found that to compare the best model fit estimates not the observed estimates to those predicted in the absence of influenza moved up the median in the box plot, which made the difference between the poisson regression and the serfling method clearer.
+
+I would recommend the poisson regression which provides more stable and consistent estimates. The poisson regression can also produce the estimates of number and rates of deaths by influenza type and sub type (influenza A, B, RSV). The model can account for changes in population size over time and other external factors.
+
+# Choosing different counterfactual for the poisson regression
+```{r}
+death.poisson.1 <- data.frame(death, predict = poisson.predict, predict.noflu = poisson.predict.noflua)
+death.poisson <- subset(death.poisson.1, death.poisson.1$COUNT > death.poisson.1$predict.noflu & death.poisson.1$peri== TRUE & death.poisson.1$neuzil==TRUE)
+head(death.poisson)
+
+for(period in periods$YRSEAS){
+  excess$p.total[excess$season == period] = sum(death.poisson$predict[death.poisson$YRSEAS == period]) - sum(death.poisson$predict.noflu[death.poisson$YRSEAS == period])
+  excess$p.weeks[excess$season == period] = length(death.poisson$WEEKOFYRS[death.poisson$YRSEAS == period])
+}
+```
+
+**Q6:  In what way is estimation of excess mortality attributable to COVID-19 different from estimation of mortality attributable to influenza? What method would you recommend for estimating excess mortality attributable to COVID-19 and why?**
+While influenza activity has a clear seasonal peak, COVID-19 has been spreading throughout the year. It remains unknown whether summer season reduces COVID-19 spread. In this sense, the periseason method may not be appropriate to estimate the excess mortality due to COVID-19. Unless there is a clear periodic pattern in COVID-19, the serfling method may not be applicable. I would recommend the poisson regression method for estimating excess mortality attributable to COVID-19 which allows us to account for different covariates and external factors.

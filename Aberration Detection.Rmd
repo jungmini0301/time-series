@@ -1,0 +1,506 @@
+---
+title: "Aberration Detection"
+author: "Jungmin Chang"
+date: "January 19, 2021"
+output: html_document
+---
+
+```{r setup, include=F, message=F}
+library("tidyverse")
+library("knitr")
+library("surveillance")
+library("MESS")
+library("ggplot2")
+library("ggrepel")
+maxit=10000
+
+# Note: The code in this week's assignment is resource intensive, you might want to work on this
+#       assignment on a powerful computer. (You can also work with smaller sets while debugging.)
+
+# Set your working directory as needed.
+opts_knit$set(root.dir = "~/Desktop/winter 2021/PPHS 616/module2", fig.align = "center")
+
+# define locations of data and key file mapping run ids to simulation scenarios
+data.dir <- "data/surveillance_subset_noBWA_100samples"
+key.filename <- "data/key.csv"
+```
+
+## 1. Using the surveillance package to simulate and test
+
+### Comparing the EARS methods
+
+```{r ears}
+# Load helper functions
+source("functions/outbreak.functions.R")
+
+# simulate a time series
+one.sts <- sim.pointSource(
+  p = 0.99, r = 0.5, length = 400,
+  A = 1, alpha = 1, beta = 0, phi = 0,
+  frequency = 1, state = NULL, K = 1.7
+)
+
+# simulate many time series
+many <- 100
+set.seed(1)
+many.sts <- lapply(1:many, function(x) {
+  sim.pointSource(
+    p = 0.99, r = 0.5, length = 400,
+    A = 1, alpha = 1, beta = 0, phi = 0,
+    frequency = 1, state = NULL, K = 1.7
+  )
+})
+
+plot(one.sts)#simulated time series -> shows seasonal patterns
+```
+
+```{r}
+# create algorithm control object
+# C1
+C1.control <- list(
+  method = "C1",
+  baseline = 7,
+  alpha = 0.001,
+  range = c(100:400)
+)
+# C2
+C2.control <- list(
+  method = "C2",
+  baseline = 7,
+  alpha = 0.001,
+  range = c(100:400)
+)
+# C3
+C3.control <- list(
+  method = "C3",
+  baseline = 7,
+  alpha = 0.001,
+  range = c(100:400)
+)
+
+# create a function to apply algorithm to one sts
+fun.onests <- function(control){
+  earsC(disProg2sts(one.sts), control = control)
+}
+# apply C1-3 algorithm to one sts
+C1.one <- earsC(disProg2sts(one.sts), control = C1.control)
+C1.one <- fun.onests(control = C1.control)
+C2.one <- fun.onests(control = C2.control)
+C3.one <- fun.onests(control = C3.control)
+
+
+# apply C1-3 algorith to many sts
+C1.many <- lapply(many.sts, function(ts) {
+  earsC(disProg2sts(ts), control = C1.control)
+}) # show graphical illustration how algorithm work against data -> compare to true outbreak
+C2.many <- lapply(many.sts, function(ts) {
+  earsC(disProg2sts(ts), control = C2.control)
+})
+C3.many <- lapply(many.sts, function(ts) {
+  earsC(disProg2sts(ts), control = C3.control)
+})
+
+
+# plot results for single application
+par(mfrow = c(1,1))
+plot(C1.one)
+plot(C2.one)
+plot(C3.one)
+```
+
+```{r}
+# assess performance for single application
+tab.performance.one <- rbind(algo.quality(C1.one), algo.quality(C2.one), algo.quality(C3.one))
+rownames(tab.performance.one) <- c("C1", "C2", "C3")
+tab.performance.one
+
+# assess performance
+C1.many.quality <- as.data.frame(algo.compare(C1.many))
+C2.many.quality <- as.data.frame(algo.compare(C2.many))
+C3.many.quality <- as.data.frame(algo.compare(C3.many))
+
+performance.many <- function(x,y) {
+  
+x.many.se <- sum(unlist(y$TP)) / sum(unlist(y$TP) + unlist(y$FN))
+x.many.sp <- sum(unlist(y$TN)) / sum(unlist(y$TN) + unlist(y$FP))
+cbind(x.many.se, x.many.sp)
+}
+
+```
+
+
+**Q1. Compare the performance of C1, C2, and C3 using the default settings.**
+
+```{r q1}
+## Apply all methods with default settings to same simulated outbreaks. Calculate 
+##  overall sensitivity and specificity for each method. Which is better and why? Comment 
+##  on how sensitivity is calculated.
+
+tab.performance.many <- rbind(performance.many(x=C1, y=C1.many.quality),
+performance.many(x=C2, y=C2.many.quality),
+performance.many(x=C3, y=C3.many.quality))
+rownames(tab.performance.many) <- c("C1", "C2", "C3")
+tab.performance.many
+```
+
+C1, C2, and C3 algorithms estimate the expected value on any given day as the average of the observed values over 7 previous days (t-1, ... t-7). For the C1 algorithm, the baseline is the past seven days whereas the C2 and the C3 have a 2-day buffer before a given day. The C3 algorithm uses the C2 statistics from day t and the previous two days.
+
+After simulating time series data 100 times, we applied the *many simulated data* to our algorithm to see the performance of algorithm against the data. We were able to find where the algorithm alerted and if those alert occurred at the same location where we had true outbreaks. To calculate sensitivity, the total number of alerts at which true outbreak occurred (true positive) was divided by the total number of outbreaks during a period of observation.
+
+The C2 algorithm yielded the highest overall sensitivity, which means that the method correctly alerted the outbreaks. The C1 algorithm yielded the highest overall specificity, which means that the method had no alert when there was no outbreak. The C3 algorithm yielded the lowest sensitivity and specificity. The C2 algorithm may be the best, which yielded second highest specificity as well as the highest sensitivity. The C1 is more likely to incorporate the outbreak data into their baseline calculations, which makes it difficult to distinguish the outbreak from the normal background disease incidence. The 2-day lag in the C2 and C3 method mitigates much of this problem.
+
+### Finding the best parameters for the Farrington method
+
+```{r farrington}
+
+# Declare algorithms to apply and set their parameters 
+F.control <- list(
+  list(funcName = "farrington", alpha = 0.01),
+  list(funcName = "farrington", alpha = 0.05),
+  list(funcName = "farrington", alpha = 0.10),
+  list(funcName = "farrington", alpha = 0.15),
+  list(funcName = "farrington", alpha = 0.20),
+  list(funcName = "farrington", alpha = 0.25),
+  list(funcName = "farrington", alpha = 0.30),
+  list(funcName = "farrington", alpha = 0.35),
+  list(funcName = "farrington", alpha = 0.40),
+  list(funcName = "farrington", alpha = 0.45),
+  list(funcName = "farrington", alpha = 0.50)
+)
+
+F.control[[11]][1]
+
+
+list_a <- list(1:11)
+list_b <- list(rep("funcName = farrington",11))
+list_c <- list(c(0.01, seq(0.05, 0.50, by=0.05)))
+
+for(i in 1:length(list_a)){
+
+  F.control[[i]][1]$alpha <- list_c[i]
+  F.control[[i]][2]$funcName <- list_b[i]
+  print(F.control)
+}
+
+F.control
+
+#alpha thresholds are the threshold of the estimated probability, above which an observation is assigned to one category (positive class) and below to the other category (negative class)
+
+# Define interval in sts for surveillance. Note that you need to have sufficient
+#  "lead time" to apply the Farrington algorithm
+F.control <- lapply(F.control, function(ctrl) {
+  ctrl$range <- 300:400
+  return(ctrl)
+})
+
+
+# apply to all simulated series, with results as list
+set.seed(1)
+F.many <- lapply(many.sts, function(ts) {
+  algo.compare(algo.call(ts, control = F.control))
+})
+
+# Average results
+F.many.quality <- algo.summary(F.many)
+
+# ROC
+TP <- c(0, F.many.quality[,5])
+FP <- c(0, 1- F.many.quality[,6])
+TN <- c(0, F.many.quality[,6])
+difference <- TP - FP
+df.roc <- data.frame(cbind(TP, TN, FP, `difference`))
+rownames(df.roc) <- c("", "a=0.01", "a=0.05", "a=0.1", "a=0.15", "a=0.2","a=0.25","a=0.3","a=0.35","a=0.4","a=0.45", "a=0.5")
+df.roc
+```
+
+
+**Q2. Generate the necessary results and plot an ROC curve using at least ten points (not counting the origins). Which threshold do you recommend be used and why?**
+
+```{r q2}
+# Place any additional code here
+# data for the roc curve
+df.roc
+
+# ROC Curve
+plot(TP~FP, type = "s")
+ggplot(df.roc) +
+  aes(FP, TP) + 
+  geom_line() +
+  geom_point(size = 1) +
+  geom_text_repel(
+    label=rownames(df.roc),
+    size = 2
+  )+
+  xlab("False Positive Rate (1-Specificity)") +
+  ylab("True Positivie Rate (Sensitivity)") +
+  ggtitle("ROC Curve with different alpha values") +
+  theme(axis.title = element_text(size = 8), plot.title = element_text(size = 10, face = "bold"))
+```
+We tested the classifier for different alpha thresholds which are the threshold of the estimated probability, above which an observation is assigned to positive class and below to negative class. The optimal threshold may be the point closest to the top left corner of the ROC curve where the point yields higher sensitivity and higher specificity (smaller false positive).
+
+The optimal threshold with this data for this algorithm is 0.05 yielding approximately 95.96% sensitivity and 97.47% specificity. Among three points closest to the top left corner of the ROC curve (a=0.01, a=0.05, a=0.1), I chose the alpha value that maximized the difference between true positive rates and false positive rates assuming the equal significance of true positive rate and false positive rate classification. The greater true positive rate and/or true negative rate are, the greater the difference between true positive rates and false positive rates will be.
+
+For example) 
+
+alpha = 0.01, TP-FP = 0.87
+alpha = 0.05, TP-FP = 0.93
+alpha = 0.10, TP-FP = 0.92
+
+## 2. Using base R commands with externally simuated outbreaks
+
+### Read Simulated Outbreaks
+
+```{r read_outbreaks}
+# Set this number low for initial attempts, then use all the runs (at the indicated
+#  concentration and duration) to answer the questions.
+nruns <- 100
+
+# Generate n (1 to 100) runids for scenario with concentration 0.1 and duration 24 hours
+runids <- get.runids(key.filename, concentration = 0.01, duration = 72, n = nruns)
+
+# If you want to use the same sample of runs each time, save the runids and then reload
+#  them again, as opposed to generating new ids
+
+write(runids,"runids.txt")
+runids = (read.table("runids.txt"))[,1]
+
+# load runs corresponding to runids
+runs <- load.runs(data.dir, runids)
+```
+
+### Describe Outbreaks
+
+```{r outbreaks}
+# Calculate summary outbreak information and truth vectors for runs
+outbreaks <- lapply(runs, o.summary)
+
+# Plot distribution of outbreak by maximum height and duration
+par(mfrow = c(1, 2))
+hist(unlist(sapply(outbreaks, "[", "height")), xlab = "Maximum Height (Daily Visits)", main = "Maximum Height")
+hist(unlist(sapply(outbreaks, "[", "length")), xlab = "Duration (Days)", main = "Duration")
+par(mfrow = c(1, 1))
+```
+
+### Apply Methods to Simulated Daily Time Series
+
+```{r methods}
+# Number of thresholds to consider when generating ROC curves
+n.cutoffs = 100
+```
+
+### Apply C2 Algorithm
+
+```{r c2_algo}
+# Apply C2 algorithm to runs
+# Apply C2 algorithm to runs
+res.c0 <- lapply(runs, c2_all, gap = 0, window = 28, threshold = 2)
+res.c2 <- lapply(runs, c2_all, gap = 2, window = 28, threshold = 2)
+res.c4 <- lapply(runs, c2_all, gap = 4, window = 28, threshold = 2)
+res.c6 <- lapply(runs, c2_all, gap = 6, window = 28, threshold = 2)
+res.c8 <- lapply(runs, c2_all, gap = 8, window = 28, threshold = 2)
+res.c10 <- lapply(runs, c2_all, gap = 10, window = 28, threshold = 2)
+
+####################################################################
+func.res <- function(X){
+  res.cX <- lapply(runs, c2_all, gap = X, window = 28, threshold = 2)
+}
+gap_value
+#return (explicit)
+#res.cX
+
+func.res.out<- map(gap_value, func.res)
+func.res.out
+####################################################################
+
+# Determine detection and timeliness for each run 
+res.c0.detect <- mapply(o.detected, res.c0, outbreaks)
+res.c0.prevent <- mapply(o.prevented, res.c0, outbreaks)
+# Determine detection and timeliness for each run 
+res.c2.detect <- mapply(o.detected, res.c2, outbreaks)
+res.c2.prevent <- mapply(o.prevented, res.c2, outbreaks) 
+# Determine detection and timeliness for each run 
+res.c4.detect <- mapply(o.detected, res.c4, outbreaks)
+res.c4.prevent <- mapply(o.prevented, res.c4, outbreaks) 
+# Determine detection and timeliness for each run 
+res.c6.detect <- mapply(o.detected, res.c6, outbreaks)
+res.c6.prevent <- mapply(o.prevented, res.c6, outbreaks) 
+# Determine detection and timeliness for each run 
+res.c8.detect <- mapply(o.detected, res.c8, outbreaks)
+res.c8.prevent <- mapply(o.prevented, res.c8, outbreaks) 
+# Determine detection and timeliness for each run 
+res.c10.detect <- mapply(o.detected, res.c10, outbreaks)
+res.c10.prevent <- mapply(o.prevented, res.c10, outbreaks) 
+
+# can I create a function using function?
+####################################################################
+
+auc.func <- function(gap){
+ res.c2 <- lapply(runs, c2_all, gap = gap, window = 28, threshold = 2)
+ performance.c2.all0 <- a.performance.all(res.c2, outbreaks, n.cutoffs)
+ performance.c2.avg0 <- a.performance.avg(performance.c2.all)
+ auc.c2 <- auc(performance.c2.avg$far, performance.c2.avg$detected)
+ auc.c2.weighted <- auc(performance.c2.avg$far, (performance.c2.avg$detected * performance.c2.avg$prevented))
+  print(data.frame(auc.c2, auc.c2.weighted))
+}
+
+df.3 <- map(gap_value, auc.func)
+####################################################################
+
+# Calculate accuracy and timeliness for each run
+performance.c0.all <- a.performance.all(res.c0, outbreaks, n.cutoffs)
+performance.c2.all <- a.performance.all(res.c2, outbreaks, n.cutoffs)
+performance.c4.all <- a.performance.all(res.c4, outbreaks, n.cutoffs)
+performance.c6.all <- a.performance.all(res.c6, outbreaks, n.cutoffs)
+performance.c8.all <- a.performance.all(res.c8, outbreaks, n.cutoffs)
+performance.c10.all <- a.performance.all(res.c10, outbreaks, n.cutoffs)
+
+# Calculate average accuracy and timeliness across all runs
+performance.c0.avg <- a.performance.avg(performance.c0.all)
+performance.c2.avg <- a.performance.avg(performance.c2.all)
+performance.c4.avg <- a.performance.avg(performance.c4.all)
+performance.c6.avg <- a.performance.avg(performance.c6.all)
+performance.c8.avg <- a.performance.avg(performance.c8.all)
+performance.c10.avg <- a.performance.avg(performance.c10.all)
+
+# Calculate area under ROC curves
+auc.c0 <- auc(performance.c0.avg$far, performance.c0.avg$detected)
+auc.c0.weighted<- auc(performance.c0.avg$far, (performance.c0.avg$detected * performance.c0.avg$prevented))
+
+auc.c2 <- auc(performance.c2.avg$far, performance.c2.avg$detected)
+auc.c2.weighted<- auc(performance.c2.avg$far, (performance.c2.avg$detected * performance.c2.avg$prevented))
+
+auc.c4 <- auc(performance.c4.avg$far, performance.c4.avg$detected)
+auc.c4.weighted<- auc(performance.c4.avg$far, (performance.c4.avg$detected * performance.c4.avg$prevented))
+
+auc.c6 <- auc(performance.c6.avg$far, performance.c6.avg$detected)
+auc.c6.weighted<- auc(performance.c6.avg$far, (performance.c6.avg$detected * performance.c6.avg$prevented))
+
+auc.c8 <- auc(performance.c8.avg$far, performance.c8.avg$detected)
+auc.c8.weighted<- auc(performance.c8.avg$far, (performance.c8.avg$detected * performance.c8.avg$prevented))
+
+auc.c10 <- auc(performance.c10.avg$far, performance.c10.avg$detected)
+auc.c10.weighted<- auc(performance.c10.avg$far, (performance.c10.avg$detected * performance.c10.avg$prevented))
+
+tab3 <- rbind(c(auc.c0,auc.c0.weighted), c(auc.c2,auc.c2.weighted), c(auc.c4,auc.c4.weighted), c(auc.c6,auc.c6.weighted), c(auc.c8,auc.c8.weighted), c(auc.c10,auc.c10.weighted))
+rownames(tab3) <- c("gap=0", "gap=2", "gap=4","gap=6","gap=8","gap=10")
+colnames(tab3) <- c("AUC", "wAUC")
+```
+
+
+```{r}
+# Plot ROC curves
+par(mfrow = c(1, 2))
+plot(performance.c2.avg$far, performance.c2.avg$detected, type = "s",
+  xlab = "False Positive Rate", ylab = "Sensitivity", xlim = c(0, 1)
+)
+lines(performance.c0.avg$far, performance.c0.avg$detected, type = "s", col = "red")
+lines(performance.c4.avg$far, performance.c4.avg$detected, type = "s", col = "blue")
+lines(performance.c6.avg$far, performance.c6.avg$detected, type = "s", col = "green")
+lines(performance.c8.avg$far, performance.c8.avg$detected, type = "s", col = "yellow" )
+lines(performance.c10.avg$far, performance.c10.avg$detected, type = "s", col = "black",lty = "dotted")
+legend("bottomright", bty='n', legend = c("gap=2", "gap=0","gap=4","gap=6","gap=8","gap=10"), lty=c(rep(1,5), 3), col = c("black", "red", "blue", "green","yellow", "black"))
+
+plot(performance.c2.avg$far, performance.c2.avg$detected * performance.c2.avg$prevented, type = "s",
+  xlab = "False Positive Rate", ylab = "Sensitivity x Prevented", xlim = c(0, 1)
+)
+lines(performance.c0.avg$far, performance.c0.avg$detected * performance.c0.avg$prevented, type = "s", col = "red")
+lines(performance.c4.avg$far, performance.c4.avg$detected * performance.c4.avg$prevented, type = "s", col = "blue")
+lines(performance.c6.avg$far, performance.c6.avg$detected * performance.c6.avg$prevented, type = "s", col =  "green")
+lines(performance.c8.avg$far, performance.c8.avg$detected * performance.c8.avg$prevented, type = "s", col = "yellow")
+lines(performance.c10.avg$far, performance.c10.avg$detected * performance.c10.avg$prevented, type = "s", col = "black", lty = "dotted")
+par(mfrow = c(1, 1))
+legend("bottomright", bty='n', legend = c("gap=2", "gap=0","gap=4","gap=6","gap=8","gap=10"), lty=c(rep(1,5), 3), col = c("black", "red", "blue", "green","yellow", "black"))
+
+```
+
+**Q3. Determine the effect of the gap parameter on the performance of the C2 algorithm (sensitivity, specificity, and detection delay). Vary the gap parameter over at least five settings and summarize your results.**
+
+```{r q3}
+# Place any additional code here
+tab3
+```
+To determine the effect of a gap on the performance of the C2 algorithm, we increased the gap values from 0 to 10 by 2 and compared each of test performance. The area under the ROC Curve, which is another measure of testing sensitivity and specificity, represents how well a parameter can distinguish the positive and/or negative classification throughout the range of thresholds. The weighted area under the ROC curve, which is sensitivity multiplied by the proportion of outbreaks prevented (weighted by the timeliness), gives information about the timeliness of the C2 algorithm. 
+
+The estimates for the AUC and the weighted AUC were more or less the same across gap values (AUC from 92.87% to 94.49%; wAUC from 74.16% to 76.43%). The C2 algorithm with 0 gap showed the highest performance in both the AUC and the weighted AUC. The C2 algorithm with 0 gap was able to explain 94.49% of positive and/or negative classification (sensitivity, specificity). The C2 algorithm with 0 gap was able to prevent 76.43% of outbreaks (timeliness). The test performance (sensitivity, specificity, and timeliness) appeared to decrease with increase of gap values.
+
+It is better to use the gap with the C2 algorithm. Reasonable range of gap allows an algorithm to improve its sensitivity excluding outbreak data as a part of its baseline estimation. Though the C2 algorithm with zero gap outperformed other algorithms with gaps, the absence of gap makes us to worry about contamination. It is crucial to choose a reasonable value of gap, because at some point the negative of introducing gap may outweigh the positive like our results. The wider the gap is, the more irrelevant data are more likely to be included in estimation. 
+
+### Apply Poisson Algorithm
+
+```{r poisson wo dow}
+##### Day-of-week = FALSE #####
+# Apply Poisson algorithm to runs
+set.seed(1)
+res.p <- lapply(runs, poisson_all, dow = FALSE, gap = 2, window = 56, interval = 14, threshold = 0.05)
+# Determine detection and timeliness for each run
+res.p.far <- mapply(a.far, res.p, outbreaks)
+res.p.detect <- mapply(o.detected, res.p, outbreaks)
+res.p.prevent <- mapply(o.prevented, res.p, outbreaks)
+
+performance.p.all <- a.performance.all(res.p, outbreaks, n.cutoffs)
+performance.p.avg <- a.performance.avg(performance.p.all)
+
+function('TRUE', 'FALSE')
+```
+
+
+```{r poisson w dow}
+##### Day-of-week = TRUE #####
+# Apply Poisson algorithm to runs
+set.seed(1)
+res.pT <- lapply(runs, poisson_all, dow = TRUE, gap = 2, window = 56, interval = 14, threshold = 0.05)
+# Determine detection and timeliness for each run
+res.pT.far <- mapply(a.far, res.pT, outbreaks)
+res.pT.detect <- mapply(o.detected, res.pT, outbreaks)
+res.pT.prevent <- mapply(o.prevented, res.pT, outbreaks)
+
+performance.pT.all <- a.performance.all(res.pT, outbreaks, n.cutoffs)
+performance.pT.avg <- a.performance.avg(performance.pT.all)
+
+# all of values in r are vectors
+# for loop
+```
+
+```{r}
+auc.p <- auc(performance.p.avg$far, performance.p.avg$detected)
+auc.p.weighted <- auc(performance.p.avg$far, (performance.p.avg$detected * performance.p.avg$prevented))
+
+auc.pT <- auc(performance.pT.avg$far, performance.pT.avg$detected)
+auc.pT.weighted <- auc(performance.pT.avg$far, (performance.pT.avg$detected * performance.pT.avg$prevented))
+
+poisson.tab <- cbind(c(auc.p, auc.p.weighted), c(auc.pT, auc.pT.weighted))
+colnames(poisson.tab) <- c("DoW==FALSE", "DoW==TRUE")
+rownames(poisson.tab) <- c("AUC", "Weighted AUC")
+poisson.tab
+```
+
+
+```{r}
+par(mfrow = c(1, 2))
+plot(performance.p.avg$far, performance.p.avg$detected, type = "s",
+  xlab = "False Positive Rate", ylab = "Sensitivity", xlim = c(0, 1)
+)
+lines(performance.pT.avg$far, performance.pT.avg$detected, col = "red", lty = "dotted")
+plot(performance.p.avg$far, performance.p.avg$detected * performance.p.avg$prevented, type = "s",
+  xlab = "False Positive Rate", ylab = "Sensitivity x Prevented", xlim = c(0, 1)
+)
+lines(performance.p.avg$far, performance.p.avg$detected * performance.p.avg$prevented, col = "red", lty = "dotted")
+par(mfrow = c(1, 1))
+```
+
+
+**Q4. Determine the effect of the dow parameter on the performance of the Poisson algorithm (sensitivity, specificity, and detection delay).**
+
+```{r q4}
+# Place any additional code here
+poisson.tab
+```
+We fitted the poisson regression models to the time series to predict the expected value of a given day. Unlike the C algorithm, the regression models allows to include other covariates. The model parameters were the day of the week and 14-day interval, which means that the poisson regression model took the day of the week effect and 14-day interval into account for its prediction. If an observed value was outside confidence intervals, the model alerted. The model performance depended on to what extent the model fitted the time series data.
+
+Two different models showed more or less the same test performances where the model without the day of week parameter showed slightly higher estimates for the AUC and the weighted AUC. The model without the day of week parameter showed the higher performance (94.52%) than the model with the parameter (94.38%). When it comes to the weighted AUC, the model performance weighted by the timeliness, the model without the parameter still showed a slightly higher performance (77.47%) than the model with the parameter (77.04%) implying that the former did a better job in preventing as well as detecting the outbreaks.
+
+Our result suggested the inclusion of the day of week parameter degraded the test performance. This may be attributable to over-fitting which resulted from adding a variable that doesn't help to improve the model performance. The day of week parameter may not improve the model performance at all if there was no significant day of week effect. Though the day of the week parameter seems less likely to improve the algorithm's aberration detection as well as forecasting with our data, the skewness of reporting is always worthy of consideration.
+
+
+
+
